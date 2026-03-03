@@ -1,6 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
 import Tesseract from 'tesseract.js'
-import { Html5Qrcode } from 'html5-qrcode'
 
 interface Word {
   id: string
@@ -8,26 +7,33 @@ interface Word {
   confidence: number
 }
 
+interface WrongWordStats {
+  text: string
+  count: number
+  lastWrongDate: string
+}
+
 const STORAGE_KEY = 'saved_answers'
 const WRONG_WORDS_KEY = 'wrong_words'
+const WRONG_WORDS_STATS_KEY = 'wrong_words_stats'
 
 export default function InputAnswers() {
-  const [isCameraOpen, setIsCameraOpen] = useState(false)
-  const [isQRScannerOpen, setIsQRScannerOpen] = useState(false)
   const [capturedImage, setCapturedImage] = useState<string>('')
   const [isRecognizing, setIsRecognizing] = useState(false)
   const [recognitionProgress, setRecognitionProgress] = useState(0)
   const [words, setWords] = useState<Word[]>([])
   const [savedAnswers, setSavedAnswers] = useState<Word[][]>([])
   const [wrongWords, setWrongWords] = useState<Word[]>([])
+  const [wrongWordStats, setWrongWordStats] = useState<WrongWordStats[]>([])
   const [editingIndex, setEditingIndex] = useState<number | null>(null)
   const [editingText, setEditingText] = useState('')
+  const [standardWords, setStandardWords] = useState<string[]>([])
+  const [showStats, setShowStats] = useState(false)
+  const [isRecognizingStandard, setIsRecognizingStandard] = useState(false)
+  const [standardInputMode, setStandardInputMode] = useState<'manual' | 'ai'>('manual')
+  const standardFileInputRef = useRef<HTMLInputElement>(null)
   
-  const videoRef = useRef<HTMLVideoElement>(null)
-  const canvasRef = useRef<HTMLCanvasElement>(null)
-  const streamRef = useRef<MediaStream | null>(null)
-  const qrScannerRef = useRef<Html5Qrcode | null>(null)
-  const qrReaderRef = useRef<HTMLDivElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     const saved = localStorage.getItem(STORAGE_KEY)
@@ -39,121 +45,135 @@ export default function InputAnswers() {
     if (wrong) {
       setWrongWords(JSON.parse(wrong))
     }
+
+    const stats = localStorage.getItem(WRONG_WORDS_STATS_KEY)
+    if (stats) {
+      setWrongWordStats(JSON.parse(stats))
+    }
   }, [])
 
-  const startCamera = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: 'environment',
-          width: { ideal: 1920 },
-          height: { ideal: 1080 }
-        }
-      })
+  // 自动整理错词统计
+  const updateWrongWordStats = (newWrongWords: Word[]) => {
+    const today = new Date().toISOString().split('T')[0]
+    const statsMap = new Map<string, WrongWordStats>()
+    
+    // 加载现有统计
+    wrongWordStats.forEach(stat => {
+      statsMap.set(stat.text.toLowerCase(), stat)
+    })
+    
+    // 更新统计
+    newWrongWords.forEach(word => {
+      const key = word.text.toLowerCase()
+      const existing = statsMap.get(key)
       
-      streamRef.current = stream
-      
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream
-        await videoRef.current.play()
-        setIsCameraOpen(true)
+      if (existing) {
+        existing.count += 1
+        existing.lastWrongDate = today
+      } else {
+        statsMap.set(key, {
+          text: word.text,
+          count: 1,
+          lastWrongDate: today
+        })
       }
-    } catch (err) {
-      console.error('无法访问摄像头:', err)
-      alert('无法访问摄像头，请确保已授予摄像头权限')
-    }
+    })
+    
+    const newStats = Array.from(statsMap.values()).sort((a, b) => b.count - a.count)
+    setWrongWordStats(newStats)
+    localStorage.setItem(WRONG_WORDS_STATS_KEY, JSON.stringify(newStats))
   }
 
-  const stopCamera = () => {
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop())
-      streamRef.current = null
+  // 比对识别结果与标准答案
+  const compareWithStandard = (recognizedWords: Word[]) => {
+    if (standardWords.length === 0) return recognizedWords
+    
+    const wrong: Word[] = []
+    const correct: Word[] = []
+    
+    recognizedWords.forEach((word, index) => {
+      const recognized = word.text.toLowerCase().trim()
+      const standard = standardWords[index]?.toLowerCase().trim()
+      
+      if (standard && recognized !== standard) {
+        wrong.push({
+          ...word,
+          text: standard // 显示标准答案
+        })
+      } else {
+        correct.push(word)
+      }
+    })
+    
+    // 保存错词
+    if (wrong.length > 0) {
+      const newWrongWords = [...wrongWords, ...wrong]
+      setWrongWords(newWrongWords)
+      localStorage.setItem(WRONG_WORDS_KEY, JSON.stringify(newWrongWords))
+      updateWrongWordStats(wrong)
     }
-    setIsCameraOpen(false)
+    
+    return recognizedWords
   }
 
-  const startQRScanner = async () => {
+  // AI 识别标准答案
+  const recognizeStandardWords = async (imageUrl: string) => {
+    setIsRecognizingStandard(true)
     try {
-      setIsQRScannerOpen(true)
-      
-      if (!qrReaderRef.current) return
-      
-      const html5QrCode = new Html5Qrcode("qr-reader")
-      qrScannerRef.current = html5QrCode
-      
-      const config = {
-        fps: 10,
-        qrbox: { width: 250, height: 250 },
-        aspectRatio: 1.0
-      }
-      
-      await html5QrCode.start(
-        { facingMode: "environment" },
-        config,
-        (decodedText) => {
-          handleQRCodeScanned(decodedText)
-        },
-        () => {
+      const result = await Tesseract.recognize(
+        imageUrl,
+        'eng',
+        {
+          logger: (m: any) => {
+            if (m.status === 'recognizing text') {
+              console.log(`标准答案识别进度: ${(m.progress * 100).toFixed(0)}%`)
+            }
+          }
         }
       )
-    } catch (err) {
-      console.error('无法启动二维码扫描:', err)
-      alert('无法启动二维码扫描，请确保已授予摄像头权限')
-      setIsQRScannerOpen(false)
+      
+      const text = result.data.text
+      console.log('标准答案识别结果:', text)
+      
+      // 解析识别的文本
+      const words = text
+        .split(/[\n,，、;；]/)
+        .map(word => word.trim())
+        .filter(word => word.length > 0 && /^[a-zA-Z]+$/.test(word))
+      
+      setStandardWords(words)
+      alert(`成功识别 ${words.length} 个标准单词`)
+    } catch (error) {
+      console.error('标准答案识别失败:', error)
+      alert('标准答案识别失败，请手动输入')
+    } finally {
+      setIsRecognizingStandard(false)
     }
   }
 
-  const stopQRScanner = async () => {
-    if (qrScannerRef.current) {
-      try {
-        await qrScannerRef.current.stop()
-      } catch (err) {
-        console.error('停止扫描器失败:', err)
+  // 处理标准答案图片上传
+  const handleStandardImageUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (file) {
+      const reader = new FileReader()
+      reader.onload = (e) => {
+        const imageUrl = e.target?.result as string
+        recognizeStandardWords(imageUrl)
       }
-      qrScannerRef.current = null
+      reader.readAsDataURL(file)
     }
-    setIsQRScannerOpen(false)
   }
 
-  const handleQRCodeScanned = async (decodedText: string) => {
-    await stopQRScanner()
-    
-    const wordsList = decodedText
-      .split(/[\n,，、;；]/)
-      .map(word => word.trim())
-      .filter(word => word.length > 0)
-      .map((word, index) => ({
-        id: `${Date.now()}-${index}`,
-        text: word,
-        confidence: 100
-      }))
-    
-    setWords(wordsList)
-    
-    const newWrongWords = [...wrongWords, ...wordsList]
-    setWrongWords(newWrongWords)
-    localStorage.setItem(WRONG_WORDS_KEY, JSON.stringify(newWrongWords))
-    
-    alert(`成功扫描并保存 ${wordsList.length} 个单词到错词本！`)
-  }
+  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file) return
 
-  const capturePhoto = () => {
-    if (!videoRef.current || !canvasRef.current) return
-    
-    const video = videoRef.current
-    const canvas = canvasRef.current
-    const context = canvas.getContext('2d')
-    
-    if (!context) return
-    
-    canvas.width = video.videoWidth
-    canvas.height = video.videoHeight
-    
-    context.drawImage(video, 0, 0, canvas.width, canvas.height)
-    
-    const imageData = canvas.toDataURL('image/png')
-    setCapturedImage(imageData)
-    stopCamera()
+    const reader = new FileReader()
+    reader.onload = (e) => {
+      const imageData = e.target?.result as string
+      setCapturedImage(imageData)
+    }
+    reader.readAsDataURL(file)
   }
 
   const recognizeText = async () => {
@@ -183,7 +203,9 @@ export default function InputAnswers() {
         }))
         .filter((word: any) => word.text.length > 0)
       
-      setWords(recognizedWords)
+      // 自动比对并整理错词
+      const finalWords = compareWithStandard(recognizedWords)
+      setWords(finalWords)
     } catch (err) {
       console.error('OCR 识别失败:', err)
       alert('OCR 识别失败，请重试')
@@ -243,6 +265,7 @@ export default function InputAnswers() {
     const newWrongWords = [...wrongWords, ...words]
     setWrongWords(newWrongWords)
     localStorage.setItem(WRONG_WORDS_KEY, JSON.stringify(newWrongWords))
+    updateWrongWordStats(words)
     alert(`成功保存 ${words.length} 个单词到错词本！`)
   }
 
@@ -267,77 +290,167 @@ export default function InputAnswers() {
     setCapturedImage('')
   }
 
+  const handleStandardWordsInput = (text: string) => {
+    const words = text
+      .split(/[\n,，、;；]/)
+      .map(word => word.trim())
+      .filter(word => word.length > 0)
+    setStandardWords(words)
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-100 p-4 md:p-8">
       <div className="max-w-4xl mx-auto space-y-6">
-        <div className="text-center space-y-3">
-          <h1 className="text-4xl md:text-5xl font-bold bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 bg-clip-text text-transparent">
-            单词默写批改
-          </h1>
-          <p className="text-gray-600 text-lg">使用摄像头拍照或扫码，自动识别英文单词</p>
+        <div className="flex justify-between items-center relative">
+          <div className="text-center space-y-3 flex-1">
+            <h1 className="text-4xl md:text-5xl font-bold bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 bg-clip-text text-transparent">
+              单词默写批改
+            </h1>
+            <p className="text-gray-600 text-lg">拍照识别英文单词，自动比对标准答案</p>
+          </div>
+          <button 
+            className="btn btn-secondary gap-2"
+            onClick={() => window.location.href = '/#analysis'}
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+            </svg>
+            返回首页
+          </button>
+        </div>
+
+        {/* 标准答案输入 */}
+        <div className="card bg-white/80 backdrop-blur-sm shadow-xl border border-white/50">
+          <div className="card-body">
+            <div className="flex justify-between items-center mb-4">
+              <h2 className="text-xl font-bold text-gray-800">标准答案</h2>
+              <div className="flex gap-2">
+                <button
+                  className={`btn btn-sm ${standardInputMode === 'manual' ? 'btn-primary' : 'btn-ghost'}`}
+                  onClick={() => setStandardInputMode('manual')}
+                >
+                  手动输入
+                </button>
+                <button
+                  className={`btn btn-sm ${standardInputMode === 'ai' ? 'btn-primary' : 'btn-ghost'}`}
+                  onClick={() => setStandardInputMode('ai')}
+                >
+                  AI识别
+                </button>
+              </div>
+            </div>
+            
+            {standardInputMode === 'manual' ? (
+              <textarea
+                className="textarea textarea-bordered w-full h-24"
+                placeholder="输入标准答案，用逗号、换行或空格分隔&#10;例如：apple, banana, orange"
+                onChange={(e) => handleStandardWordsInput(e.target.value)}
+              />
+            ) : (
+              <div className="space-y-4">
+                <p className="text-sm text-gray-600">
+                  上传包含标准答案的图片，AI将自动识别单词
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  <label className="btn btn-secondary gap-2 cursor-pointer">
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                    </svg>
+                    上传答案图片
+                    <input
+                      ref={standardFileInputRef}
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={handleStandardImageUpload}
+                    />
+                  </label>
+                  <label className="btn btn-accent gap-2 cursor-pointer">
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+                    </svg>
+                    拍照识别
+                    <input
+                      type="file"
+                      accept="image/*"
+                      capture="environment"
+                      className="hidden"
+                      onChange={handleStandardImageUpload}
+                    />
+                  </label>
+                </div>
+                {isRecognizingStandard && (
+                  <div className="flex items-center gap-2 text-blue-600">
+                    <span className="loading loading-spinner loading-sm"></span>
+                    <span>正在识别标准答案...</span>
+                  </div>
+                )}
+              </div>
+            )}
+            
+            {standardWords.length > 0 && (
+              <div className="mt-4">
+                <div className="text-sm text-gray-600 mb-2">
+                  已设置 {standardWords.length} 个标准单词
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {standardWords.map((word, index) => (
+                    <span key={index} className="badge badge-primary">
+                      {index + 1}. {word}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
 
         <div className="card bg-white/80 backdrop-blur-sm shadow-2xl border border-white/50">
           <div className="card-body space-y-6">
             <div className="flex flex-wrap gap-4">
-              {!isCameraOpen && !isQRScannerOpen && !capturedImage && (
+              {!capturedImage && (
                 <>
                   <button 
                     className="btn btn-primary gap-2"
-                    onClick={startCamera}
+                    onClick={() => setShowStats(!showStats)}
                   >
                     <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
                     </svg>
-                    打开摄像头
+                    错题统计
                   </button>
                   <button 
                     className="btn btn-secondary gap-2"
-                    onClick={startQRScanner}
+                    onClick={() => fileInputRef.current?.click()}
                   >
                     <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
                     </svg>
-                    扫码识别
+                    上传图片
                   </button>
-                </>
-              )}
-
-              {isCameraOpen && (
-                <>
-                  <button 
-                    className="btn btn-success gap-2"
-                    onClick={capturePhoto}
-                  >
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={handleFileUpload}
+                  />
+                  <label className="btn btn-accent gap-2 cursor-pointer">
                     <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
                     </svg>
-                    拍照
-                  </button>
-                  <button 
-                    className="btn btn-error gap-2"
-                    onClick={stopCamera}
-                  >
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                    关闭
-                  </button>
+                    直接拍照
+                    <input
+                      type="file"
+                      accept="image/*"
+                      capture="environment"
+                      className="hidden"
+                      onChange={handleFileUpload}
+                    />
+                  </label>
                 </>
-              )}
-
-              {isQRScannerOpen && (
-                <button 
-                  className="btn btn-error gap-2"
-                  onClick={stopQRScanner}
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                  停止扫描
-                </button>
               )}
 
               {capturedImage && !isRecognizing && (
@@ -363,33 +476,6 @@ export default function InputAnswers() {
                 </>
               )}
             </div>
-
-            {isCameraOpen && (
-              <div className="relative">
-                <video 
-                  ref={videoRef}
-                  className="w-full rounded-lg shadow-lg"
-                  autoPlay
-                  playsInline
-                />
-                <canvas ref={canvasRef} className="hidden" />
-              </div>
-            )}
-
-            {isQRScannerOpen && (
-              <div className="relative">
-                <div 
-                  id="qr-reader" 
-                  ref={qrReaderRef}
-                  className="w-full rounded-lg shadow-lg"
-                  style={{ minHeight: '300px' }}
-                ></div>
-                <div className="text-center mt-4 text-gray-600">
-                  <p>请扫描包含单词列表的二维码</p>
-                  <p className="text-sm">二维码内容格式：单词1,单词2,单词3</p>
-                </div>
-              </div>
-            )}
 
             {capturedImage && (
               <div className="space-y-4">
@@ -459,71 +545,130 @@ export default function InputAnswers() {
                 </div>
 
                 <div className="space-y-2">
-                  {words.map((word, index) => (
-                    <div key={word.id} className="card bg-base-100 border border-base-300">
-                      <div className="card-body p-4 flex flex-row items-center gap-4">
-                        <span className="badge badge-primary font-mono text-lg">
-                          {index + 1}
-                        </span>
-                        
-                        {editingIndex === index ? (
-                          <div className="flex-1 flex gap-2">
-                            <input 
-                              type="text" 
-                              className="input input-bordered flex-1" 
-                              value={editingText}
-                              onChange={(e) => setEditingText(e.target.value)}
-                              autoFocus
-                            />
-                            <button 
-                              className="btn btn-success btn-sm"
-                              onClick={handleSaveEdit}
-                            >
-                              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                              </svg>
-                            </button>
-                            <button 
-                              className="btn btn-error btn-sm"
-                              onClick={handleCancelEdit}
-                            >
-                              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                              </svg>
-                            </button>
-                          </div>
-                        ) : (
-                          <>
-                            <div className="flex-1">
-                              <p className="text-xl font-medium text-gray-800">{word.text}</p>
-                              <p className="text-sm text-gray-500">
-                                置信度: {word.confidence.toFixed(1)}%
-                              </p>
-                            </div>
-                            <div className="flex gap-1">
+                  {words.map((word, index) => {
+                    const isWrong = standardWords.length > 0 && 
+                      index < standardWords.length && 
+                      word.text.toLowerCase().trim() !== standardWords[index].toLowerCase().trim()
+                    
+                    return (
+                      <div key={word.id} className={`card border ${isWrong ? 'bg-red-50 border-red-300' : 'bg-base-100 border-base-300'}`}>
+                        <div className="card-body p-4 flex flex-row items-center gap-4">
+                          <span className={`badge font-mono text-lg ${isWrong ? 'badge-error' : 'badge-primary'}`}>
+                            {index + 1}
+                          </span>
+                          
+                          {editingIndex === index ? (
+                            <div className="flex-1 flex gap-2">
+                              <input 
+                                type="text" 
+                                className="input input-bordered flex-1" 
+                                value={editingText}
+                                onChange={(e) => setEditingText(e.target.value)}
+                                autoFocus
+                              />
                               <button 
-                                className="btn btn-ghost btn-sm"
-                                onClick={() => handleEditWord(index)}
+                                className="btn btn-success btn-sm"
+                                onClick={handleSaveEdit}
                               >
                                 <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                                 </svg>
                               </button>
                               <button 
-                                className="btn btn-ghost btn-sm text-error"
-                                onClick={() => handleDeleteWord(index)}
+                                className="btn btn-error btn-sm"
+                                onClick={handleCancelEdit}
                               >
                                 <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
                                 </svg>
                               </button>
                             </div>
-                          </>
-                        )}
+                          ) : (
+                            <>
+                              <div className="flex-1">
+                                <p className={`text-xl font-medium ${isWrong ? 'text-red-700' : 'text-gray-800'}`}>
+                                  {word.text}
+                                  {isWrong && standardWords[index] && (
+                                    <span className="text-sm text-red-500 ml-2">
+                                      (应为: {standardWords[index]})
+                                    </span>
+                                  )}
+                                </p>
+                                <p className="text-sm text-gray-500">
+                                  置信度: {word.confidence.toFixed(1)}%
+                                </p>
+                              </div>
+                              <div className="flex gap-1">
+                                <button 
+                                  className="btn btn-ghost btn-sm"
+                                  onClick={() => handleEditWord(index)}
+                                >
+                                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                                  </svg>
+                                </button>
+                                <button 
+                                  className="btn btn-ghost btn-sm text-error"
+                                  onClick={() => handleDeleteWord(index)}
+                                >
+                                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                  </svg>
+                                </button>
+                              </div>
+                            </>
+                          )}
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    )
+                  })}
                 </div>
+              </div>
+            )}
+
+            {/* 错词统计 */}
+            {wrongWordStats.length > 0 && (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-2xl font-bold text-gray-800">错词统计</h2>
+                  <button 
+                    className="btn btn-sm btn-ghost"
+                    onClick={() => setShowStats(!showStats)}
+                  >
+                    {showStats ? '收起' : '展开'}
+                  </button>
+                </div>
+                {showStats && (
+                  <div className="overflow-x-auto">
+                    <table className="table table-zebra">
+                      <thead>
+                        <tr>
+                          <th>单词</th>
+                          <th>错误次数</th>
+                          <th>最后错误日期</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {wrongWordStats.slice(0, 10).map((stat, index) => (
+                          <tr key={index}>
+                            <td className="font-medium">{stat.text}</td>
+                            <td>
+                              <span className={`badge ${stat.count >= 3 ? 'badge-error' : stat.count >= 2 ? 'badge-warning' : 'badge-info'}`}>
+                                {stat.count} 次
+                              </span>
+                            </td>
+                            <td className="text-sm text-gray-500">{stat.lastWrongDate}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    {wrongWordStats.length > 10 && (
+                      <div className="text-center mt-2 text-sm text-gray-500">
+                        还有 {wrongWordStats.length - 10} 个错词...
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
 
@@ -536,7 +681,9 @@ export default function InputAnswers() {
                     onClick={() => {
                       if (confirm('确定清空错词本吗？')) {
                         setWrongWords([])
+                        setWrongWordStats([])
                         localStorage.removeItem(WRONG_WORDS_KEY)
+                        localStorage.removeItem(WRONG_WORDS_STATS_KEY)
                       }
                     }}
                   >

@@ -35,10 +35,54 @@ function App() {
   const { answer, loading, error, analyze } = useSocrates(import.meta.env.VITE_API_KEY)
   const resultRef = useRef<HTMLDivElement>(null)
 
+  // 预设指令
+  const defaultPrompts: SavedPrompt[] = [
+    {
+      id: 'default-1',
+      title: '🔍 详细解析',
+      content: '请详细分析这道题的解题思路，包括：1. 题目考查的知识点 2. 解题步骤和方法 3. 易错点和注意事项 4. 类似题型的解题技巧',
+      createdAt: Date.now()
+    },
+    {
+      id: 'default-2',
+      title: '📚 知识点讲解',
+      content: '请帮我讲解这道题涉及的核心知识点，包括：1. 基本概念和定义 2. 相关公式和定理 3. 典型应用场景 4. 记忆方法和技巧',
+      createdAt: Date.now()
+    },
+    {
+      id: 'default-3',
+      title: '✅ 检查答案',
+      content: '请帮我检查这道题的答案是否正确，如果错误请指出：1. 错误的地方 2. 正确的解法 3. 错误原因分析 4. 如何避免类似错误',
+      createdAt: Date.now()
+    },
+    {
+      id: 'default-4',
+      title: '📝 解题步骤',
+      content: '请给出这道题的详细解题步骤，要求：1. 每一步都有清晰的说明 2. 标注关键步骤和易错点 3. 提供多种解法（如果有）4. 总结解题套路',
+      createdAt: Date.now()
+    },
+    {
+      id: 'default-5',
+      title: '🎯 举一反三',
+      content: '基于这道题，请帮我：1. 总结这类题的通用解题方法 2. 提供3-5道类似的练习题 3. 分析这些题的共同点 4. 给出进阶挑战题',
+      createdAt: Date.now()
+    },
+    {
+      id: 'default-6',
+      title: '🤔 思路引导',
+      content: '请不要直接给出答案，而是通过提问的方式引导我思考：1. 先问我对题目的理解 2. 引导我回忆相关知识点 3. 提示解题方向 4. 鼓励我尝试解答',
+      createdAt: Date.now()
+    }
+  ]
+
   useEffect(() => {
     const saved = localStorage.getItem(STORAGE_KEY)
     if (saved) {
-      setSavedPrompts(JSON.parse(saved))
+      const userPrompts = JSON.parse(saved)
+      // 合并预设指令和用户保存的指令
+      setSavedPrompts([...defaultPrompts, ...userPrompts])
+    } else {
+      setSavedPrompts(defaultPrompts)
     }
   }, [])
 
@@ -300,9 +344,15 @@ function App() {
   }
 
   const deletePrompt = (id: string) => {
+    // 不允许删除预设指令
+    if (id.startsWith('default-')) {
+      alert('预设指令不能删除')
+      return
+    }
     const updated = savedPrompts.filter(p => p.id !== id)
     setSavedPrompts(updated)
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(updated))
+    // 只保存用户自定义的指令
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(updated.filter(p => !p.id.startsWith('default-'))))
   }
 
   const loadPrompt = (prompt: SavedPrompt) => {
@@ -472,38 +522,75 @@ function App() {
                   </div>
                   
                   <div className="space-y-2 max-h-60 overflow-y-auto">
-                    {savedPrompts.length === 0 ? (
+                    {/* 预设指令 */}
+                    {savedPrompts.filter(p => p.id.startsWith('default-')).length > 0 && (
+                      <div className="mb-4">
+                        <div className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">预设指令</div>
+                        {savedPrompts.filter(p => p.id.startsWith('default-')).map((prompt) => (
+                          <div key={prompt.id} className="flex items-center justify-between p-3 bg-blue-50 rounded-lg hover:bg-blue-100 transition-colors mb-2">
+                            <div 
+                              className="flex-1 cursor-pointer"
+                              onClick={() => loadPrompt(prompt)}
+                            >
+                              <div className="font-medium text-blue-800">{prompt.title}</div>
+                              <div className="text-sm text-blue-600 truncate">{prompt.content}</div>
+                            </div>
+                            <div className="flex gap-1">
+                              <button 
+                                className="btn btn-ghost btn-xs text-blue-600"
+                                onClick={() => loadPrompt(prompt)}
+                                title="使用此指令"
+                              >
+                                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                                </svg>
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    
+                    {/* 用户自定义指令 */}
+                    {savedPrompts.filter(p => !p.id.startsWith('default-')).length > 0 && (
+                      <div>
+                        <div className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">我的指令</div>
+                        {savedPrompts.filter(p => !p.id.startsWith('default-')).map((prompt) => (
+                          <div key={prompt.id} className="flex items-center justify-between p-3 bg-base-200 rounded-lg hover:bg-base-300 transition-colors mb-2">
+                            <div 
+                              className="flex-1 cursor-pointer"
+                              onClick={() => loadPrompt(prompt)}
+                            >
+                              <div className="font-medium">{prompt.title}</div>
+                              <div className="text-sm text-gray-600 truncate">{prompt.content}</div>
+                            </div>
+                            <div className="flex gap-1">
+                              <button 
+                                className="btn btn-ghost btn-xs"
+                                onClick={() => startEdit(prompt)}
+                                title="编辑"
+                              >
+                                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                                </svg>
+                              </button>
+                              <button 
+                                className="btn btn-ghost btn-xs text-error"
+                                onClick={() => deletePrompt(prompt.id)}
+                                title="删除"
+                              >
+                                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                </svg>
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    
+                    {savedPrompts.length === 0 && (
                       <p className="text-gray-500 text-center py-4">暂无保存的指令</p>
-                    ) : (
-                      savedPrompts.map((prompt) => (
-                        <div key={prompt.id} className="flex items-center justify-between p-3 bg-base-200 rounded-lg hover:bg-base-300 transition-colors">
-                          <div 
-                            className="flex-1 cursor-pointer"
-                            onClick={() => loadPrompt(prompt)}
-                          >
-                            <div className="font-medium">{prompt.title}</div>
-                            <div className="text-sm text-gray-600 truncate">{prompt.content}</div>
-                          </div>
-                          <div className="flex gap-1">
-                            <button 
-                              className="btn btn-ghost btn-xs"
-                              onClick={() => startEdit(prompt)}
-                            >
-                              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                              </svg>
-                            </button>
-                            <button 
-                              className="btn btn-ghost btn-xs text-error"
-                              onClick={() => deletePrompt(prompt.id)}
-                            >
-                              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                              </svg>
-                            </button>
-                          </div>
-                        </div>
-                      ))
                     )}
                   </div>
                 </div>
